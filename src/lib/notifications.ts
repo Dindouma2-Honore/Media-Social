@@ -3,30 +3,31 @@ import * as Device from 'expo-device';
 import { Platform } from 'react-native';
 import { supabase } from './supabase';
 
-// Expo Go ne gère plus les notifications push (Android). On les active seulement
-// dans un vrai build (développement ou preview), voir README-partie5.md.
-export const isExpoGo =
-  Constants.appOwnership === 'expo' ||
-  Constants.executionEnvironment === ExecutionEnvironment.StoreClient;
+export const isExpoGo = Constants.executionEnvironment === ExecutionEnvironment.StoreClient;
 
 let currentToken: string | null = null;
 let handlerConfigured = false;
 
-// On charge "expo-notifications" à la demande (et pas en haut du fichier)
-// pour ne rien casser dans Expo Go.
 function loadNotifications(): typeof import('expo-notifications') | null {
-  if (isExpoGo || !Device.isDevice) return null;
+  if (isExpoGo) {
+    console.log('Push : ignoré (Expo Go)');
+    return null;
+  }
+  if (!Device.isDevice) {
+    console.log('Push : ignoré (émulateur)');
+    return null;
+  }
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   return require('expo-notifications');
 }
 
 /** Demande la permission, récupère le token du téléphone et l'enregistre dans Supabase. */
 export async function registerForPushNotifications(): Promise<void> {
+  console.log('Push : début de l’enregistrement');
   try {
     const Notifications = loadNotifications();
     if (!Notifications) return;
 
-    // Affiche les notifications même quand l'application est ouverte.
     if (!handlerConfigured) {
       Notifications.setNotificationHandler({
         handleNotification: async () => ({
@@ -43,6 +44,8 @@ export async function registerForPushNotifications(): Promise<void> {
       await Notifications.setNotificationChannelAsync('default', {
         name: 'Notifications',
         importance: Notifications.AndroidImportance.MAX,
+        sound: 'default',
+        vibrationPattern: [0, 250, 250, 250],
         lightColor: '#1D4ED8',
       });
     }
@@ -52,21 +55,34 @@ export async function registerForPushNotifications(): Promise<void> {
     if (existing !== 'granted') {
       status = (await Notifications.requestPermissionsAsync()).status;
     }
-    if (status !== 'granted') return;
+    console.log('Push : permission =', status);
+    if (status !== 'granted') {
+      console.warn('Push : permission refusée (Paramètres Android > Applications > Notifications)');
+      return;
+    }
 
-    // L'identifiant du projet EAS est créé par la commande "eas init".
     const projectId = Constants.expoConfig?.extra?.eas?.projectId ?? Constants.easConfig?.projectId;
+    console.log('Push : projectId =', projectId);
     if (!projectId) {
-      console.warn("Notifications : projectId EAS introuvable. Lance 'eas init' (voir README-partie5.md).");
+      console.warn("Push : projectId EAS introuvable. Vérifie 'extra.eas.projectId' dans app.json.");
       return;
     }
 
     const token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
+    console.log('Push : token obtenu =', token);
     currentToken = token;
-    await supabase.rpc('register_push_token', { p_token: token, p_platform: Platform.OS });
+
+    const { error } = await supabase.rpc('register_push_token', {
+      p_token: token,
+      p_platform: Platform.OS,
+    });
+    if (error) {
+      console.warn('Push : Supabase a refusé le token :', error.message);
+    } else {
+      console.log('Push : token enregistré dans Supabase');
+    }
   } catch (e) {
-    // Les notifications sont un bonus : une erreur ici ne doit jamais bloquer l'application.
-    console.warn('Notifications : enregistrement impossible', e);
+    console.warn('Push : ÉCHEC =', (e as { message?: string })?.message ?? e);
   }
 }
 
